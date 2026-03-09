@@ -13,7 +13,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  TARGET: armv6-unknown-linux-musleabihf
+  TARGET: arm-unknown-linux-gnueabihf
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -115,16 +115,15 @@ jobs:
         with:
           ref: ${{ needs.check-upstream.outputs.new_version }}
 
-      - name: Install cross
-        run: |
-          echo "📦 安装 cross 交叉编译工具..."
-          cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: ${{ env.TARGET }}
+
+      - name: Install cross
+        run: |
+          echo "📦 安装 cross 交叉编译工具..."
+          cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -152,8 +151,6 @@ jobs:
 
           # 使用 cross 编译，启用静态链接
           cross build --release --target ${{ env.TARGET }} --locked \
-            --features "observability-otel" \
-            --env "CARGO_TARGET_{{'{{'}}TARGET{{'-'}}upper}}_MUSL_LIBC=true" \
             --env "RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-s"
 
           BINARY_PATH=target/${{ env.TARGET }}/release/zeroclaw
