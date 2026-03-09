@@ -1,0 +1,217 @@
+name: Sync Upstream and Build ARMv6
+
+on:
+  schedule:
+    # 每天 UTC 0:00 和 12:00 检查（北京时间 8:00 和 20:00）
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  UPSTREAM_REPO: zeroclaw-labs/zeroclaw
+  TARGET: armv6-unknown-linux-musleabihf
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+jobs:
+  check-upstream:
+    name: Check Upstream Release
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+      should_sync: ${{ steps.check.outputs.should_sync }}
+    steps:
+      - name: Check upstream releases
+        id: check
+        run: |
+          set -euo pipefail
+
+          echo "🔍 检查上游仓库 ${{ env.UPSTREAM_REPO }} 的新版本..."
+
+          # 获取上游最新 release
+          LATEST_RELEASE=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name')
+          echo "上游最新版本: $LATEST_RELEASE"
+
+          # 检查本地仓库最新 release
+          CURRENT_RELEASE=$(gh api repos/${{ github.repository }}/releases --jq '.[0].tag_name' 2>/dev/null || echo "none")
+          echo "当前仓库版本: $CURRENT_RELEASE"
+
+          # 比较版本
+          if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
+            echo "🎉 发现新版本: $LATEST_RELEASE"
+            echo "new_version=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+            echo "should_sync=true" >> $GITHUB_OUTPUT
+
+            # 发送 Telegram 通知
+            curl -X POST \
+              "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\", \"text\": \"🆕 ZeroClaw 新版本发布！\n\n📦 版本: $LATEST_RELEASE\n📍 上游: ${{ env.UPSTREAM_REPO }}\n🔄 开始同步代码...\"}"
+          else
+            echo "✅ 已是最新版本，无需同步"
+            echo "new_version=none" >> $GITHUB_OUTPUT
+            echo "should_sync=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sync-repo:
+    name: Sync Repository
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_sync == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync from upstream
+        run: |
+          set -euo pipefail
+
+          echo "🔄 开始同步上游代码..."
+
+          # 配置 git
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+          # 克隆当前仓库
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git repo
+          cd repo
+
+          # 添加上游仓库
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+
+          # 获取上游代码
+          git fetch upstream
+
+          # 获取最新版本标签
+          NEW_VERSION="${{ needs.check-upstream.outputs.new_version }}"
+          git checkout ${NEW_VERSION}
+
+          # 推送到当前仓库
+          git push origin ${NEW_VERSION} -f
+
+          # 同时更新 master 分支（如果上游 master 更新）
+          git fetch upstream master:upstream_master
+          git push origin master:master -f || echo "master 分支已同步"
+
+          echo "✅ 代码同步完成！"
+
+          # 发送 Telegram 通知
+          curl -X POST \
+            "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\", \"text\": \"✅ 代码同步完成！\n\n📦 版本: $NEW_VERSION\n📍 仓库: ${{ github.repository }}\n🔨 开始编译 ARMv6 版本...\"}"
+
+  build-armv6:
+    name: Build ARMv6 Static Binary
+    needs: sync-repo
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-upstream.outputs.new_version }}
+
+      - name: Install cross
+        run: |
+          echo "📦 安装 cross 交叉编译工具..."
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ env.TARGET }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ env.TARGET }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build static binary
+        run: |
+          set -euo pipefail
+
+          echo "🔨 开始编译 ${{ env.TARGET }} 静态链接版本..."
+
+          # 使用 cross 编译，启用静态链接
+          cross build --release --target ${{ env.TARGET }} --locked \
+            --features "observability-otel" \
+            --env "CARGO_TARGET_{{'{{'}}TARGET{{'-'}}upper}}_MUSL_LIBC=true" \
+            --env "RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-s"
+
+          BINARY_PATH=target/${{ env.TARGET }}/release/zeroclaw
+
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "❌ 二进制文件未找到！"
+            exit 1
+          fi
+
+          # 检查是否为静态链接
+          echo "🔍 检查二进制文件类型..."
+          file "$BINARY_PATH"
+          ls -lh "$BINARY_PATH"
+
+          # 打包
+          mkdir -p artifact
+          cp "$BINARY_PATH" artifact/zeroclaw-armv6
+          chmod +x artifact/zeroclaw-armv6
+
+          echo "✅ 编译成功！"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-armv6-musl
+          path: artifact/zeroclaw-armv6
+          retention-days: 30
+
+      - name: Send success notification
+        if: success()
+        run: |
+          VERSION="${{ needs.check-upstream.outputs.new_version }}"
+
+          # 发送成功消息
+          curl -X POST \
+            "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\", \"text\": \"✅ ZeroClaw ARMv6 编译成功！\n\n📦 版本: $VERSION\n🎯 目标: ${{ env.TARGET }}\n📦 静态链接: 是\n📍 仓库: ${{ github.repository }}\n\n⏳ 正在发送二进制文件...\"}"
+
+      - name: Send binary via Telegram
+        if: success()
+        run: |
+          VERSION="${{ needs.check-upstream.outputs.new_version }}"
+
+          # 发送二进制文件（Telegram 限制 50MB，zeroclaw 通常 < 10MB）
+          curl -X POST \
+            "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
+            -F "document=@artifact/zeroclaw-armv6" \
+            -F "caption=\"🚀 ZeroClaw $VERSION - ARMv6 musl 静态版本\n\n🎯 目标: ${{ env.TARGET }}\n📦 静态链接: 是\n🔗 仓库: ${{ github.repository }}\n\n💾 保存到 SD 卡，赋予执行权限即可运行：\nchmod +x zeroclaw-armv6\n./zeroclaw-armv6 --version\""
+
+      - name: Send failure notification
+        if: failure()
+        run: |
+          # 获取最近的日志
+          LOGS=$(journalctl -u github-actions --since "1 hour ago" --no-pager 2>/dev/null || echo "无法获取日志")
+
+          curl -X POST \
+            "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\", \"text\": \"❌ ZeroClaw ARMv6 编译失败！\n\n📦 版本: ${{ needs.check-upstream.outputs.new_version }}\n🎯 目标: ${{ env.TARGET }}\n📍 仓库: ${{ github.repository }}\n🔗 查看日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n请检查编译错误日志。\"}"
