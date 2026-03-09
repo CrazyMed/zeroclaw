@@ -13,7 +13,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  TARGET: armv6-unknown-linux-musleabihf
+  TARGET: arm-unknown-linux-musleabi
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -148,12 +148,10 @@ jobs:
           set -euo pipefail
 
           echo "🔨 开始编译 ${{ env.TARGET }} 静态链接版本..."
+          echo "📋 让 cross 自己管理 linker 和 musl 配置"
 
-          # 使用 cross 编译，启用静态链接
-          cross build --release --target ${{ env.TARGET }} --locked \
-            --features "observability-otel" \
-            --env "CARGO_TARGET_{{'{{'}}TARGET{{'-'}}upper}}_MUSL_LIBC=true" \
-            --env "RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-s"
+          # 使用 cross 编译，让它自己管理 linker
+          cross build --release --target ${{ env.TARGET }} --locked
 
           BINARY_PATH=target/${{ env.TARGET }}/release/zeroclaw
 
@@ -162,7 +160,7 @@ jobs:
             exit 1
           fi
 
-          # 检查是否为静态链接
+          # 检查二进制文件类型
           echo "🔍 检查二进制文件类型..."
           file "$BINARY_PATH"
           ls -lh "$BINARY_PATH"
