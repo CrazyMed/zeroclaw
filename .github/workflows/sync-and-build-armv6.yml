@@ -13,7 +13,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  TARGET: arm-unknown-linux-gnueabihf
+  TARGET: armv6-unknown-linux-musleabihf
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -151,6 +151,8 @@ jobs:
 
           # 使用 cross 编译，启用静态链接
           cross build --release --target ${{ env.TARGET }} --locked \
+            --features "observability-otel" \
+            --env "CARGO_TARGET_{{'{{'}}TARGET{{'-'}}upper}}_MUSL_LIBC=true" \
             --env "RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-s"
 
           BINARY_PATH=target/${{ env.TARGET }}/release/zeroclaw
