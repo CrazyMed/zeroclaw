@@ -1,9 +1,9 @@
 name: Sync Upstream and Build ARMv6
 
 on:
-  schedule:
+#  schedule:
     # 每天 UTC 0:00 和 12:00 检查（北京时间 8:00 和 20:00）
-    - cron: '0 0,12 * * *'
+#    - cron: '0 0,12 * * *'
   workflow_dispatch:  # 允许手动触发
 
 permissions:
