@@ -5,7 +5,10 @@ on:
     # 每天 UTC 0:00 和 12:00 检查（北京时间 8:00 和 20:00）
 #    - cron: '0 0,12 * * *'
   workflow_dispatch:  # 允许手动触发
-
+    inputs:
+      target_tag:
+        description: '编译版本号'
+        default: 'v0.1.7' # 这样你运行的时候能手动改
 permissions:
   contents: write
   packages: write
@@ -117,7 +120,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-upstream.outputs.new_version }}
+          ref: ${{ github.event.inputs.target_tag }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
