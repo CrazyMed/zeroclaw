@@ -1,4 +1,4 @@
-name: Build armv6 Static Binary
+name: Build ARMv6 Static Binary
 
 on:
   workflow_dispatch:
@@ -9,13 +9,8 @@ on:
         default: 'v0.3.4-beta.232'
 
 jobs:
-  build:
+  build-armv6:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - armv6-unknown-linux-musleabihf
-          - arm-unknown-linux-musleabihf
     steps:
       - name: Checkout upstream
         uses: actions/checkout@v4
@@ -26,19 +21,25 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: arm-unknown-linux-gnueabihf
       
-      - name: Install musl-tools
+      - name: Install cross-compilation tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
       
-      - name: Build static binary
+      - name: Build static ARMv6 binary
         run: |
-          cargo build --release --target ${{ matrix.target }} --features static
+          cargo build --release --target arm-unknown-linux-gnueabihf --features static
+          strip target/arm-unknown-linux-gnueabihf/release/zeroclaw
+        env:
+          CC_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+          CXX_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS: "-C target-feature=+v6"
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeroclaw-${{ matrix.target }}-${{ github.event.inputs.version }}
-          path: target/${{ matrix.target }}/release/zeroclaw
+          name: zeroclaw-armv6-static-${{ github.event.inputs.version }}
+          path: target/arm-unknown-linux-gnueabihf/release/zeroclaw
