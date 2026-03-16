@@ -1,9 +1,35 @@
-# New content with modifications
-# Replace target
-- target: arm-unknown-linux-musleabihf
+name: Build ARMv6 Static Binary
 
-# Changes in packages and environment
-- remove: gcc-arm-linux-gnueabihf
-- add: musl-tools
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v0.3.4-beta.232)'
+        required: true
+        default: 'v0.3.4-beta.232'
 
-# Removing environment variables section for RUSTFLAGS
+jobs:
+  build-armv6:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream
+        uses: actions/checkout@v4
+        with:
+          repository: zeroclaw-labs/zeroclaw
+          ref: ${{ github.event.inputs.version }}
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      
+      - name: Build static ARMv6 binary with cross
+        run: |
+          cross build --release --target armv6-unknown-linux-musleabihf
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-armv6-static-${{ github.event.inputs.version }}
+          path: target/armv6-unknown-linux-musleabihf/release/zeroclaw
