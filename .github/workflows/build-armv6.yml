@@ -1,0 +1,44 @@
+name: Build armv6 Static Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v0.3.4-beta.232)'
+        required: true
+        default: 'v0.3.4-beta.232'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - armv6-unknown-linux-musleabihf
+          - arm-unknown-linux-musleabihf
+    steps:
+      - name: Checkout upstream
+        uses: actions/checkout@v4
+        with:
+          repository: zeroclaw-labs/zeroclaw
+          ref: ${{ github.event.inputs.version }}
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      
+      - name: Build static binary
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features static
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-${{ matrix.target }}-${{ github.event.inputs.version }}
+          path: target/${{ matrix.target }}/release/zeroclaw
