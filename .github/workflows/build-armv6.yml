@@ -1,45 +1,9 @@
-name: Build ARMv6 Static Binary
+# New content with modifications
+# Replace target
+- target: arm-unknown-linux-musleabihf
 
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to build (e.g., v0.3.4-beta.232)'
-        required: true
-        default: 'v0.3.4-beta.232'
+# Changes in packages and environment
+- remove: gcc-arm-linux-gnueabihf
+- add: musl-tools
 
-jobs:
-  build-armv6:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout upstream
-        uses: actions/checkout@v4
-        with:
-          repository: zeroclaw-labs/zeroclaw
-          ref: ${{ github.event.inputs.version }}
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: arm-unknown-linux-gnueabihf
-      
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
-      
-      - name: Build static ARMv6 binary
-        run: |
-          cargo build --release --target arm-unknown-linux-gnueabihf
-          strip target/arm-unknown-linux-gnueabihf/release/zeroclaw
-        env:
-          CC_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
-          CXX_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
-          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
-          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS: "-C target-feature=+v6"
-      
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zeroclaw-armv6-static-${{ github.event.inputs.version }}
-          path: target/arm-unknown-linux-gnueabihf/release/zeroclaw
+# Removing environment variables section for RUSTFLAGS
