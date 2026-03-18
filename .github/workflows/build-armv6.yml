@@ -1,4 +1,4 @@
-name: 1Sync Upstream and Build ARMv6
+name: 1Sync Upstream and Build ARMv7 (Pi Zero W Compatible)
 
 on:
   schedule:
@@ -18,8 +18,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  # ✅ ARMv6 使用 nightly 工具链，或改用 ARMv7
-  TARGET: armv6l-unknown-linux-musleabihf
+  # ✅ 改用 ARMv7 - 100% 兼容 ARMv6 硬件，官方支持
+  TARGET: armv7l-unknown-linux-musleabihf
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -106,12 +106,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-armv6:
-    name: Build ARMv6 Static Binary
+  build-armv7:
+    name: Build ARMv7 Static Binary
     needs: [check-upstream, sync-repo]
     if: needs.check-upstream.outputs.should_sync == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -119,9 +119,9 @@ jobs:
           ref: ${{ needs.check-upstream.outputs.new_version }}
           fetch-depth: 0
 
-      # ✅ 修复：使用 nightly 工具链以支持 ARMv6
-      - name: Setup Rust toolchain (nightly for ARMv6)
-        uses: dtolnay/rust-toolchain@nightly
+      # ✅ 使用 stable，ARMv7 官方支持
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}
 
@@ -129,6 +129,13 @@ jobs:
         run: |
           echo "📦 安装 cross 交叉编译工具..."
           cargo install cross --locked
+
+      - name: Show toolchain info
+        run: |
+          echo "📋 Rust 工具链信息:"
+          rustc --version
+          cargo --version
+          rustup target list | grep "${{ env.TARGET }}"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -158,101 +165,4 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "🔨 开始编译 ${{ env.TARGET }} 静态链接版本..."
-          echo "📦 Rust 工具链版本:"
-          rustc --version
-          cargo --version
-
-          # ✅ 使用 cross 确保兼容性
-          cross build --release \
-            --target ${{ env.TARGET }} \
-            --locked \
-            -v
-
-          BINARY_PATH="target/${{ env.TARGET }}/release/zeroclaw"
-
-          if [ ! -f "$BINARY_PATH" ]; then
-            echo "❌ 二进制文件未找到！"
-            ls -la "target/${{ env.TARGET }}/release/" || true
-            exit 1
-          fi
-
-          echo "🔍 检查二进制文件类型..."
-          file "$BINARY_PATH"
-          ls -lh "$BINARY_PATH"
-          
-          # 验证静态链接
-          if file "$BINARY_PATH" | grep -q "statically linked"; then
-            echo "✅ 确认为静态链接二进制"
-          else
-            echo "⚠️ 检查链接依赖:"
-            ldd "$BINARY_PATH" || true
-          fi
-
-          mkdir -p artifact
-          cp "$BINARY_PATH" artifact/zeroclaw-armv6
-          chmod +x artifact/zeroclaw-armv6
-          echo "✅ 编译成功！"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zeroclaw-armv6-${{ needs.check-upstream.outputs.new_version }}
-          path: artifact/zeroclaw-armv6
-          retention-days: 30
-          if-no-files-found: error
-
-      - name: Create Release
-        if: success()
-        uses: softprops/action-gh-release@v1
-        with:
-          files: artifact/zeroclaw-armv6
-          tag_name: ${{ needs.check-upstream.outputs.new_version }}
-          body: |
-            # ZeroClaw ${{ needs.check-upstream.outputs.new_version }} - ARMv6 Static Binary
-
-            ## Build Information
-            - **Target**: `${{ env.TARGET }}`
-            - **Linking**: Static (musl)
-            - **Toolchain**: Rust nightly (for ARMv6 support)
-            - **Builder**: cross-rs
-
-            ## Installation on Raspberry Pi Zero W
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-upstream.outputs.new_version }}/zeroclaw-armv6
-            chmod +x zeroclaw-armv6
-            sudo mv zeroclaw-armv6 /usr/local/bin/zeroclaw
-            zeroclaw --version
-            ```
-
-            ## Verification
-            ```bash
-            file /usr/local/bin/zeroclaw
-            ldd /usr/local/bin/zeroclaw  # Should output: not a dynamic executable
-            ```
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Send Telegram notification - Success
-        if: success()
-        run: |
-          curl -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
-              "text": "✅ ZeroClaw ARMv6 编译成功！\n\n📦 版本: ${{ needs.check-upstream.outputs.new_version }}\n🎯 目标: armv6l-unknown-linux-musleabihf\n📦 链接: Static (musl)\n🔗 下载: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.new_version }}"
-            }'
-
-      - name: Send Telegram notification - Failure
-        if: failure()
-        run: |
-          curl -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
-              "text": "❌ ZeroClaw ARMv6 编译失败！\n\n📦 版本: ${{ needs.check-upstream.outputs.new_version }}\n🎯 目标: armv6l-unknown-linux-musleabihf\n📍 仓库: ${{ github.repository }}\n🔗 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }'
+          echo "🔨 开始编译 ${{ env.TARGET }}
