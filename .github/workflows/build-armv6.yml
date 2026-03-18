@@ -23,29 +23,32 @@ jobs:
 
       - name: Get latest upstream version
         id: get_version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "正在查询上游最新版本..."
-          LATEST_VERSION=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name')
+          # 使用环境变量传递仓库名，避免在命令中直接拼接 ${{ }}
+          REPO_NAME="${{ env.UPSTREAM_REPO }}"
+          LATEST_VERSION=$(gh api repos/$REPO_NAME/releases/latest --jq '.tag_name')
+          
           if [ -z "$LATEST_VERSION" ]; then
             echo "❌ 无法获取上游版本信息。"
             exit 1
           fi
+          
           echo "upstream_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
           echo "✅ 上游最新版本为: $LATEST_VERSION"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sync upstream code
+        env:
+          VERSION: ${{ steps.get_version.outputs.upstream_version }}
         run: |
-          VERSION=${{ steps.get_version.outputs.upstream_version }}
           echo "开始同步 $VERSION 版本代码..."
           
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
           git fetch upstream --tags
           
-          # --- 核心修复在这里 ---
-          # 使用 -B 代替 -b
-          # -B 表示：如果 master 分支不存在则创建，如果已存在则强制重置到当前标签
+          # 使用 -B 强制重置 master 分支到上游标签
           git checkout -B master "tags/$VERSION"
           
           git push origin master --force
@@ -69,6 +72,7 @@ jobs:
         run: |
           echo "🔨 开始编译 ${{ env.TARGET }} ..."
           export CARGO_BUILD_JOBS=2
+          
           cross build --release --target ${{ env.TARGET }} --locked
           
           mkdir -p artifact
@@ -85,6 +89,9 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
+        env:
+          VERSION: ${{ steps.get_version.outputs.upstream_version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.get_version.outputs.upstream_version }}-armv6
           name: ZeroClaw ${{ steps.get_version.outputs.upstream_version }} (ARMv6)
@@ -92,13 +99,12 @@ jobs:
             自动同步自上游 ${{ steps.get_version.outputs.upstream_version }} 版本。
             此版本为树莓派 Zero W 优化的 ARMv6 静态链接版本。
           files: artifact/zeroclaw-armv6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send success notification to Telegram
         if: success()
+        env:
+          VERSION: ${{ steps.get_version.outputs.upstream_version }}
         run: |
-          VERSION=${{ steps.get_version.outputs.upstream_version }}
           MESSAGE="✅ ZeroClaw ARMv6 构建成功！%0A%0A📦 版本: $VERSION%0A🔗 Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${VERSION}-armv6"
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
@@ -109,7 +115,3 @@ jobs:
           MESSAGE="❌ ZeroClaw ARMv6 构建失败！%0A%0A🔗 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
                -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
-
-      - name: Sync upstream code
-        run: |
-          VERSION=${{ steps.get_ver
