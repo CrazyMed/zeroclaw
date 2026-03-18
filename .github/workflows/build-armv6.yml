@@ -1,12 +1,19 @@
-name: Sync Upstream and Build ARMv7 (Pi Zero W Compatible)
+# Sync Upstream and Build (optimized)
+name: Sync Upstream and Build ARMv6
+
+# Cancel previous runs when a new one starts
+concurrency:
+  group: sync-and-build-armv6
+  cancel-in-progress: true
 
 on:
-  schedule:
-    - cron: '0 0,12 * * *'
+  # scheduled check (disabled by default, uncomment to enable)
+  # schedule:
+  #   - cron: '0 0,12 * * *'
   workflow_dispatch:
     inputs:
       target_tag:
-        description: '编译版本号（可选，不填则自动检测最新）'
+        description: 'Optional: force a specific tag to build (leave empty to auto-detect)'
         required: false
         default: ''
 
@@ -15,11 +22,11 @@ permissions:
   packages: read
 
 env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  # 使用 ARMv7 target（在大多数情况下可以在 Pi Zero W 上运行）
-  TARGET: armv7-unknown-linux-gnueabihf
+  # Default target: armv7l musl (recommended — robust on CI and runs on Pi Zero W)
+  TARGET: armv7l-unknown-linux-musleabihf
+  CARGO_TERM_COLOR: always
+  # Telegram secrets (must be set in repo Secrets)
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -31,181 +38,93 @@ jobs:
       new_version: ${{ steps.check.outputs.new_version }}
       should_sync: ${{ steps.check.outputs.should_sync }}
     steps:
+      - name: Setup gh (CLI) & git
+        uses: actions/setup-node@v4
+        # dummy step to ensure environment; gh is available on ubuntu-latest by default
       - name: Check upstream releases
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          echo "🔍 检查上游仓库 ${{ env.UPSTREAM_REPO }} 的新版本..."
-          TARGET_TAG="${{ github.event.inputs.target_tag }}"
+          echo "🔍 Checking upstream ${UPSTREAM_REPO} for latest release..."
 
-          if [ -z "$TARGET_TAG" ]; then
-            LATEST_RELEASE=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
-            if [ -z "$LATEST_RELEASE" ]; then
-              echo "❌ 无法获取上游版本信息"
-              exit 1
-            fi
+          # Allow manual override via workflow_dispatch input
+          if [ -n "${{ github.event.inputs.target_tag }}" ]; then
+            LATEST="${{ github.event.inputs.target_tag }}"
+            echo "📌 Using manually provided tag: $LATEST"
           else
-            LATEST_RELEASE="$TARGET_TAG"
-            echo "📌 使用手动指定版本: $LATEST_RELEASE"
+            # Use GH cli to fetch upstream latest release tag
+            LATEST=$(gh api repos/${UPSTREAM_REPO}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+            if [ -z "$LATEST" ]; then
+              echo "⚠️ Could not determine upstream latest release"
+              echo "new_version=none" >> $GITHUB_OUTPUT
+              echo "should_sync=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "🔔 Upstream latest: $LATEST"
           fi
 
-          echo "上游最新版本: $LATEST_RELEASE"
+          # Determine current repo latest release (if any)
+          CURRENT=$(gh api repos/${{ github.repository }}/releases --jq '.[0].tag_name' 2>/dev/null || echo "none")
+          echo "Current repo latest: $CURRENT"
 
-          CURRENT_RELEASE=$(gh api repos/${{ github.repository }}/releases --jq '.[0].tag_name' 2>/dev/null || echo "none")
-          echo "当前仓库版本: $CURRENT_RELEASE"
-
-          if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
-            echo "🎉 发现新版本: $LATEST_RELEASE"
-            echo "new_version=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo "🎉 New upstream release detected: $LATEST"
+            echo "new_version=$LATEST" >> $GITHUB_OUTPUT
             echo "should_sync=true" >> $GITHUB_OUTPUT
+
+            # lightweight Telegram notice (no secrets leak)
+            if [ -n "${TELEGRAM_BOT_TOKEN}" ] && [ -n "${TELEGRAM_CHAT_ID}" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🆕 ZeroClaw upstream new release: ${LATEST} — syncing and building...\"}" || true
+            fi
           else
-            echo "✅ 已是最新版本，无需同步"
+            echo "✅ Upstream is in sync (no new release)"
             echo "new_version=none" >> $GITHUB_OUTPUT
             echo "should_sync=false" >> $GITHUB_OUTPUT
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   sync-repo:
-    name: Sync Repository
+    name: Sync Repository (push tags/branches)
     needs: check-upstream
     if: needs.check-upstream.outputs.should_sync == 'true'
     runs-on: ubuntu-latest
+    # This job needs write permission to push; we use PAT for pushing (minimize global write scope)
     permissions:
-      contents: write
+      contents: read
     steps:
-      - name: Sync from upstream
-        run: |
-          set -euo pipefail
-          echo "🔄 开始同步上游代码..."
-          git config --global user.name "ZeroClaw Build Bot"
-          git config --global user.email "build@zeroclaw.local"
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git repo
-          cd repo
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
-          git fetch upstream
-          NEW_VERSION="${{ needs.check-upstream.outputs.new_version }}"
-          git checkout "${NEW_VERSION}" || { echo "❌ 无法检出版本 $NEW_VERSION"; exit 1; }
-          git push origin "${NEW_VERSION}" -f || true
-          git fetch upstream master:upstream_master || true
-          git push origin master:master -f || true
-          echo "✅ 代码同步完成！"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-armv7:
-    name: Build ARMv7 Static Binary
-    needs: [check-upstream, sync-repo]
-    if: needs.check-upstream.outputs.should_sync == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout code
+      - name: Checkout current repo (use PAT for push)
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.check-upstream.outputs.new_version }}
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
 
-      # 注意：不要在这里让 rustup 在主机上下载目标组件（会触发 rust-std 下载失败）
-      - name: Setup Rust toolchain (no target components)
-        uses: dtolnay/rust-toolchain@stable
-        # 不传 targets 参数，也不要显式 rustup target add
-
-      - name: Install cross
-        run: |
-          echo "📦 安装 cross 交叉编译工具 (cargo install cross --locked)"
-          cargo install cross --locked
-
-      - name: Show toolchain info
-        run: |
-          echo "📋 Rust 工具链信息:"
-          rustc --version || true
-          cargo --version || true
-          rustup show || true
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-index-
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-${{ env.TARGET }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-${{ env.TARGET }}-
-
-      - name: Build static binary using cross (containerized)
+      - name: Add upstream and sync tag/branches
         env:
-          # Force cross to use Docker (default) and not attempt to use local rustup added targets
-          # No rustup target add was performed on host
-          RUST_BACKTRACE: 1
+          UPSTREAM: ${{ env.UPSTREAM_REPO }}
+          NEW_TAG: ${{ needs.check-upstream.outputs.new_version }}
+          GIT_PUSH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
-          echo "🔨 使用 cross 在容器中构建 target=${{ env.TARGET }} (cross 会拉取对应容器镜像)"
-          cross build --release --target ${{ env.TARGET }} --locked --verbose
+          echo "🔄 Syncing from upstream ${UPSTREAM} -> ${GITHUB_REPOSITORY} (tag: ${NEW_TAG})"
 
-          BINARY_PATH="target/${{ env.TARGET }}/release/zeroclaw"
-          if [ ! -f "$BINARY_PATH" ]; then
-            echo "❌ 二进制文件未找到：$BINARY_PATH"
-            ls -la "target/${{ env.TARGET }}/release/" || true
-            exit 1
-          fi
+          git remote add upstream https://github.com/${UPSTREAM}.git || true
+          git fetch upstream --tags --no-recurse-submodules
 
-          echo "🔍 二进制信息："
-          file "$BINARY_PATH" || true
-          ls -lh "$BINARY_PATH" || true
+          # checkout upstream tag
+          git fetch upstream "refs/tags/${NEW_TAG}:refs/tags/${NEW_TAG}" || true
+          git checkout "tags/${NEW_TAG}" -B "sync-${NEW_TAG}"
 
-          mkdir -p artifact
-          cp "$BINARY_PATH" artifact/zeroclaw-armv7
-          chmod +x artifact/zeroclaw-armv7
-          echo "✅ 编译并打包完成"
+          # push tag and branch
+          git push "https://${GIT_PUSH_TOKEN}@github.com/${{ github.repository }}.git" "refs/tags/${NEW_TAG}:refs/tags/${NEW_TAG}" --force || true
+          git push "https://${GIT_PUSH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:master --force || echo "master push skipped or already up-to-date"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zeroclaw-armv7-${{ needs.check-upstream.outputs.new_version }}
-          path: artifact/zeroclaw-armv7
-          retention-days: 30
-          if-no-files-found: error
+          echo "✅ Sync complete: ${NEW_TAG}"
 
-      - name: Create GitHub Release
+      - name: Notify sync complete
         if: success()
-        uses: softprops/action-gh-release@v1
-        with:
-          files: artifact/zeroclaw-armv7
-          tag_name: ${{ needs.check-upstream.outputs.new_version }}
-          body: |
-            ZeroClaw ${{ needs.check-upstream.outputs.new_version }} - ARMv7 Static Binary
-            Target: ${{ env.TARGET }}
-          draft: false
-          prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Telegram notify (success)
-        if: success()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_CHAT_ID }}\",\"text\":\"✅ ZeroClaw ARMv7 编译成功：${{ needs.check-upstream.outputs.new_version }}\\n下载: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.new_version }}\"}"
-
-      - name: Telegram notify (failure)
-        if: failure()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_CHAT_ID }}\",\"text\":\"❌ ZeroClaw ARM 构建失败：${{ needs.check-upstream.outputs.new_version }}\\n查看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+          T
