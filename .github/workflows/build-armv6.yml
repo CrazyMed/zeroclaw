@@ -37,4 +37,79 @@ jobs:
 
       - name: Sync upstream code
         run: |
+          VERSION=${{ steps.get_version.outputs.upstream_version }}
+          echo "开始同步 $VERSION 版本代码..."
+          
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream --tags
+          
+          # --- 核心修复在这里 ---
+          # 使用 -B 代替 -b
+          # -B 表示：如果 master 分支不存在则创建，如果已存在则强制重置到当前标签
+          git checkout -B master "tags/$VERSION"
+          
+          git push origin master --force
+          echo "✅ 代码同步完成。"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ env.TARGET }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build static binary
+        run: |
+          echo "🔨 开始编译 ${{ env.TARGET }} ..."
+          export CARGO_BUILD_JOBS=2
+          cross build --release --target ${{ env.TARGET }} --locked
+          
+          mkdir -p artifact
+          cp target/${{ env.TARGET }}/release/zeroclaw artifact/zeroclaw-armv6
+          chmod +x artifact/zeroclaw-armv6
+          ls -lh artifact/zeroclaw-armv6
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-armv6-binary
+          path: artifact/zeroclaw-armv6
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.upstream_version }}-armv6
+          name: ZeroClaw ${{ steps.get_version.outputs.upstream_version }} (ARMv6)
+          body: |
+            自动同步自上游 ${{ steps.get_version.outputs.upstream_version }} 版本。
+            此版本为树莓派 Zero W 优化的 ARMv6 静态链接版本。
+          files: artifact/zeroclaw-armv6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send success notification to Telegram
+        if: success()
+        run: |
+          VERSION=${{ steps.get_version.outputs.upstream_version }}
+          MESSAGE="✅ ZeroClaw ARMv6 构建成功！%0A%0A📦 版本: $VERSION%0A🔗 Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${VERSION}-armv6"
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
+
+      - name: Send failure notification to Telegram
+        if: failure()
+        run: |
+          MESSAGE="❌ ZeroClaw ARMv6 构建失败！%0A%0A🔗 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
+
+      - name: Sync upstream code
+        run: |
           VERSION=${{ steps.get_ver
