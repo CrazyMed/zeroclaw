@@ -1,32 +1,142 @@
-name: Build ARMv6 Static Binary
+name: 自动同步并构建 ARMv6 版本
 
 on:
+  # 允许手动触发，用于测试
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to build (e.g., v0.3.4-beta.232)'
-        required: true
-        default: 'v0.3.4-beta.232'
+  # 每天自动运行一次，检查更新
+  schedule:
+    - cron: '0 2 * * *'
+
+env:
+  # 核心配置：目标三元组，明确为 ARMv6 硬浮点，使用 musl 静态链接
+  TARGET: armv6l-unknown-linux-musleabihf
+  # 上游仓库地址
+  UPSTREAM_REPO: zeroclaw-labs/zeroclaw
+  # 你的 Telegram Bot 配置 (需要你在仓库 Settings -> Secrets and variables -> Actions 中设置)
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
 jobs:
-  build-armv6:
+  sync_and_build:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/cross-rs/armv6-unknown-linux-musl:latest
+    # 设置必要的权限
+    permissions:
+      contents: write # 允许推送代码和创建 Release
+
     steps:
-      - name: Checkout upstream
+      # 步骤 1: 检出你的仓库（用于后续推送）
+      - name: Checkout your repository
         uses: actions/checkout@v4
-        with:
-          repository: zeroclaw-labs/zeroclaw
-          ref: ${{ github.event.inputs.version }}
-      
-      - name: Build static ARMv6 binary
+
+      # 步骤 2: 获取上游最新 Release 的版本号
+      - name: Get latest upstream version
+        id: get_version
         run: |
-          cargo build --release
-          strip /build/target/armv6-unknown-linux-musl/release/zeroclaw
-      
+          echo "正在查询上游最新版本..."
+          # 使用 GitHub API 获取最新 release 的标签名
+          LATEST_VERSION=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name')
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "❌ 无法获取上游版本信息，请检查网络或仓库地址。"
+            exit 1
+          fi
+          echo "upstream_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ 上游最新版本为: $LATEST_VERSION"
+        env:
+          # 使用 workflow 自动生成的 GITHUB_TOKEN 即可访问公开仓库的 API
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 步骤 3: 同步上游代码到你的仓库的 master 分支
+      - name: Sync upstream code
+        run: |
+          VERSION=${{ steps.get_version.outputs.upstream_version }}
+          echo "开始同步 $VERSION 版本代码..."
+          
+          # 添加上游仓库为远程仓库
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          
+          # 拉取上游的标签和代码
+          git fetch upstream --tags
+          
+          # 检出上游对应版本的标签
+          git checkout "tags/$VERSION" -b master
+          
+          # 强制推送到你的仓库的 master 分支，完成同步
+          # 注意：这会覆盖你仓库 master 分支上的提交，请确保这是你想要的
+          git push origin master --force
+          
+          echo "✅ 代码同步完成，当前分支 master 已更新为 $VERSION 版本。"
+
+      # 步骤 4: 安装 Rust 工具链
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ env.TARGET }}
+
+      # 步骤 5: 安装 cross 交叉编译工具
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # 步骤 6: 配置缓存，加速编译
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      # 步骤 7: 开始编译 ARMv6 静态二进制文件
+      - name: Build static binary
+        run: |
+          echo "🔨 开始为 ${{ env.TARGET }} 编译静态链接版本..."
+          # 限制并行编译任务数，防止内存溢出
+          export CARGO_BUILD_JOBS=2
+          
+          cross build --release --target ${{ env.TARGET }} --locked
+          
+          # 准备产物目录
+          mkdir -p artifact
+          cp target/${{ env.TARGET }}/release/zeroclaw artifact/zeroclaw-armv6
+          chmod +x artifact/zeroclaw-armv6
+          ls -lh artifact/zeroclaw-armv6
+          echo "✅ 编译完成。"
+
+      # 步骤 8: 上传编译好的文件作为 Artifacts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeroclaw-armv6-static-${{ github.event.inputs.version }}
-          path: target/armv6-unknown-linux-musl/release/zeroclaw
+          name: zeroclaw-armv6-binary
+          path: artifact/zeroclaw-armv6
+          retention-days: 30
+
+      # 步骤 9: 创建 GitHub Release 并附带二进制文件
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          # 使用上游的版本号，加上 -armv6 后缀作为你仓库的 Release 标签
+          tag_name: ${{ steps.get_version.outputs.upstream_version }}-armv6
+          name: ZeroClaw ${{ steps.get_version.outputs.upstream_version }} (ARMv6)
+          body: |
+            自动同步自上游 [${{ env.UPSTREAM_REPO }}](${{ github.server_url }}/${{ env.UPSTREAM_REPO }}) 的 ${{ steps.get_version.outputs.upstream_version }} 版本。
+            
+            **此版本为树莓派 Zero W / Zero 2 W 优化的 ARMv6 静态链接版本。**
+          files: artifact/zeroclaw-armv6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 步骤 10: 发送成功通知到 Telegram
+      - name: Send success notification to Telegram
+        if: success()
+        run: |
+          VERSION=${{ steps.get_version.outputs.upstream_version }}
+          MESSAGE="✅ ZeroClaw ARMv6 构建成功！%0A%0A📦 版本: $VERSION%0A🎯 目标: ${{ env.TARGET }}%0A🔗 查看发布: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${VERSION}-armv6"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
+
+      # 步骤 11: 发送失败通知到 Telegram
+      - name: Send failure notification to Telegram
+        if: failure()
+        run: |
+          MESSAGE="❌ ZeroClaw ARMv6 构建失败！%0A%0A🔗 查看日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}&text=$MESSAGE"
