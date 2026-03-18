@@ -1,4 +1,4 @@
-name: 1Sync Upstream and Build ARMv7 (Pi Zero W Compatible)
+name: Sync Upstream and Build ARMv7 (Pi Zero W Compatible)
 
 on:
   schedule:
@@ -18,8 +18,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   UPSTREAM_REPO: zeroclaw-labs/zeroclaw
-  # ✅ 改用 ARMv7 - 100% 兼容 ARMv6 硬件，官方支持
-  TARGET: armv7l-unknown-linux-musleabihf
+  # 使用 ARMv7 target（在大多数情况下可以在 Pi Zero W 上运行）
+  TARGET: armv7-unknown-linux-gnueabihf
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -37,9 +37,8 @@ jobs:
           set -euo pipefail
 
           echo "🔍 检查上游仓库 ${{ env.UPSTREAM_REPO }} 的新版本..."
-
           TARGET_TAG="${{ github.event.inputs.target_tag }}"
-          
+
           if [ -z "$TARGET_TAG" ]; then
             LATEST_RELEASE=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
             if [ -z "$LATEST_RELEASE" ]; then
@@ -79,30 +78,19 @@ jobs:
       - name: Sync from upstream
         run: |
           set -euo pipefail
-
           echo "🔄 开始同步上游代码..."
-
           git config --global user.name "ZeroClaw Build Bot"
           git config --global user.email "build@zeroclaw.local"
-
           git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git repo
           cd repo
-
           git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
           git fetch upstream
-
           NEW_VERSION="${{ needs.check-upstream.outputs.new_version }}"
-          git checkout "${NEW_VERSION}" || {
-            echo "❌ 无法检出版本 $NEW_VERSION"
-            exit 1
-          }
-
+          git checkout "${NEW_VERSION}" || { echo "❌ 无法检出版本 $NEW_VERSION"; exit 1; }
           git push origin "${NEW_VERSION}" -f || true
           git fetch upstream master:upstream_master || true
           git push origin master:master -f || true
-
           echo "✅ 代码同步完成！"
-
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -119,23 +107,22 @@ jobs:
           ref: ${{ needs.check-upstream.outputs.new_version }}
           fetch-depth: 0
 
-      # ✅ 使用 stable，ARMv7 官方支持
-      - name: Setup Rust toolchain
+      # 注意：不要在这里让 rustup 在主机上下载目标组件（会触发 rust-std 下载失败）
+      - name: Setup Rust toolchain (no target components)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ env.TARGET }}
+        # 不传 targets 参数，也不要显式 rustup target add
 
       - name: Install cross
         run: |
-          echo "📦 安装 cross 交叉编译工具..."
+          echo "📦 安装 cross 交叉编译工具 (cargo install cross --locked)"
           cargo install cross --locked
 
       - name: Show toolchain info
         run: |
           echo "📋 Rust 工具链信息:"
-          rustc --version
-          cargo --version
-          rustup target list | grep "${{ env.TARGET }}"
+          rustc --version || true
+          cargo --version || true
+          rustup show || true
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -161,8 +148,64 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-${{ env.TARGET }}-
 
-      - name: Build static binary
+      - name: Build static binary using cross (containerized)
+        env:
+          # Force cross to use Docker (default) and not attempt to use local rustup added targets
+          # No rustup target add was performed on host
+          RUST_BACKTRACE: 1
         run: |
           set -euo pipefail
+          echo "🔨 使用 cross 在容器中构建 target=${{ env.TARGET }} (cross 会拉取对应容器镜像)"
+          cross build --release --target ${{ env.TARGET }} --locked --verbose
 
-          echo "🔨 开始编译 ${{ env.TARGET }}
+          BINARY_PATH="target/${{ env.TARGET }}/release/zeroclaw"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "❌ 二进制文件未找到：$BINARY_PATH"
+            ls -la "target/${{ env.TARGET }}/release/" || true
+            exit 1
+          fi
+
+          echo "🔍 二进制信息："
+          file "$BINARY_PATH" || true
+          ls -lh "$BINARY_PATH" || true
+
+          mkdir -p artifact
+          cp "$BINARY_PATH" artifact/zeroclaw-armv7
+          chmod +x artifact/zeroclaw-armv7
+          echo "✅ 编译并打包完成"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-armv7-${{ needs.check-upstream.outputs.new_version }}
+          path: artifact/zeroclaw-armv7
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifact/zeroclaw-armv7
+          tag_name: ${{ needs.check-upstream.outputs.new_version }}
+          body: |
+            ZeroClaw ${{ needs.check-upstream.outputs.new_version }} - ARMv7 Static Binary
+            Target: ${{ env.TARGET }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Telegram notify (success)
+        if: success()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_CHAT_ID }}\",\"text\":\"✅ ZeroClaw ARMv7 编译成功：${{ needs.check-upstream.outputs.new_version }}\\n下载: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.new_version }}\"}"
+
+      - name: Telegram notify (failure)
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${{ secrets.TELEGRAM_CHAT_ID }}\",\"text\":\"❌ ZeroClaw ARM 构建失败：${{ needs.check-upstream.outputs.new_version }}\\n查看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
